@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using Unity.Netcode;
 using UnityEngine.UI;
 
@@ -19,10 +19,12 @@ public class PlayerControllerFPS : NetworkBehaviour
     public NetworkVariable<int> currentHP = new NetworkVariable<int>(100, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private Slider healthSlider;
 
-    [Header("Настройки стрельбы")]
-    public float shootDistance = 20f;
-    public int weaponDamage = 25;
-    private Button shootButton;
+    [Header("Физическая стрельба")]
+    public GameObject bulletPrefab; // Префаб пули с компонентом NetProjectile
+    public float bulletSpeed = 40f; // Скорость полета патрона
+    public float fireRate = 0.2f;   // Задержка между выстрелами (автоматический огонь)
+    public int weaponDamage = 25;   // Урон от пули
+    private float nextFireTime = 0f;
 
     [Header("ДИНАМИЧЕСКИЙ СПАВН ОРУЖИЯ")]
     [Tooltip("Список префабов оружия из папки проекта (0 - Автомат, 1 - Пистолет)")]
@@ -36,6 +38,7 @@ public class PlayerControllerFPS : NetworkBehaviour
     public Camera playerCamera;
     private MobileJoystick movementJoystick;
     private MobileJumpButton jumpButton;
+    private MobileShootButton shootButtonScript;
 
     private CharacterController controller;
     private Vector3 velocity;
@@ -74,11 +77,10 @@ public class PlayerControllerFPS : NetworkBehaviour
             return;
         }
 
-        var joysticks = Resources.FindObjectsOfTypeAll<MobileJoystick>();
-        movementJoystick = joysticks.Length > 0 ? joysticks[0] : null;
-
-        var jumpButtons = Resources.FindObjectsOfTypeAll<MobileJumpButton>();
-        jumpButton = jumpButtons.Length > 0 ? jumpButtons[0] : null;
+        // Поиск мобильных элементов управления на Canvas
+        movementJoystick = FindFirstObjectByType<MobileJoystick>();
+        jumpButton = FindFirstObjectByType<MobileJumpButton>();
+        shootButtonScript = FindFirstObjectByType<MobileShootButton>();
 
         FindGameplayUI();
         UpdateWeaponModel(equippedWeaponIndex.Value);
@@ -137,29 +139,22 @@ public class PlayerControllerFPS : NetworkBehaviour
                 break;
             }
         }
-
-        var buttons = Resources.FindObjectsOfTypeAll<Button>();
-        foreach (var btn in buttons)
-        {
-            if (btn.gameObject.name == "ShootButton")
-            {
-                shootButton = btn;
-                shootButton.onClick.RemoveAllListeners();
-                shootButton.onClick.AddListener(ShootWeapon);
-                break;
-            }
-        }
     }
 
     void Update()
     {
+        if (!IsOwner) return;
+
+        // Постоянная подстраховка ссылок на UI элементы
         if (movementJoystick == null) movementJoystick = FindFirstObjectByType<MobileJoystick>();
         if (jumpButton == null) jumpButton = FindFirstObjectByType<MobileJumpButton>();
-        if ((healthSlider == null || shootButton == null) && IsOwner) FindGameplayUI();
+        if (shootButtonScript == null) shootButtonScript = FindFirstObjectByType<MobileShootButton>();
+        if (healthSlider == null) FindGameplayUI();
 
         GetInput();
         HandleCamera();
 
+        // Проверка прыжка
         bool pcJump = Input.GetButtonDown("Jump");
         bool mobileJump = jumpButton != null && jumpButton.JumpRequested;
 
@@ -169,14 +164,21 @@ public class PlayerControllerFPS : NetworkBehaviour
             if (mobileJump) jumpButton.ResetJumpRequest();
         }
 
-        if (Input.GetMouseButtonDown(1))
+        // Автоматическая стрельба по зажатию (ПК или Мобилка)
+        bool pcShoot = Input.GetMouseButton(0); 
+        bool mobileShoot = shootButtonScript != null && shootButtonScript.IsHoldingShoot;
+
+        if ((pcShoot || mobileShoot) && Time.time >= nextFireTime)
         {
+            nextFireTime = Time.time + fireRate;
             ShootWeapon();
         }
     }
 
     void FixedUpdate()
     {
+        if (!IsOwner) return;
+
         if (controller.isGrounded && velocity.y < 0)
         {
             velocity.y = -2f;
@@ -210,47 +212,49 @@ public class PlayerControllerFPS : NetworkBehaviour
 
         if (playerCamera == null) return;
 
-        Ray ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-        RaycastHit hit;
+        // Точка и направление вылета физического патрона
+        Vector3 spawnPos = playerCamera.transform.position + playerCamera.transform.forward * 1.2f;
+        Quaternion spawnRot = playerCamera.transform.rotation;
 
-        int layerMask = ~LayerMask.GetMask("Ignore Raycast");
-
-        if (Physics.Raycast(ray, out hit, shootDistance, layerMask))
-        {
-            NetworkObject netObj = hit.collider.GetComponent<NetworkObject>();
-            if (netObj != null)
-            {
-                ShootTargetServerRpc(netObj.NetworkObjectId, weaponDamage);
-            }
-        }
+        SpawnBulletServerRpc(spawnPos, spawnRot);
     }
 
     [ServerRpc]
-    void ShootTargetServerRpc(ulong targetNetObjectId, int damage)
+    void SpawnBulletServerRpc(Vector3 position, Quaternion rotation)
     {
-        if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(targetNetObjectId, out NetworkObject netObj))
+        if (bulletPrefab == null) return;
+
+        // Спавн физического объекта пули на сервере
+        GameObject bullet = Instantiate(bulletPrefab, position, rotation);
+        
+        Rigidbody rb = bullet.GetComponent<Rigidbody>();
+        if (rb != null)
         {
-            if (netObj != null)
+            rb.linearVelocity = bullet.transform.forward * bulletSpeed;
+        }
+
+        NetProjectile projectileScript = bullet.GetComponent<NetProjectile>();
+        if (projectileScript != null)
+        {
+            projectileScript.Initialize(weaponDamage, OwnerClientId);
+        }
+
+        // Регистрируем объект пули в сети Netcode
+        bullet.GetComponent<NetworkObject>().Spawn(true);
+        
+        // Транслируем звук выстрела всем клиентам
+        PlayShootSoundClientRpc();
+    }
+
+    [ClientRpc]
+    void PlayShootSoundClientRpc()
+    {
+        if (currentSpawnedWeaponModel != null)
+        {
+            AudioSource source = currentSpawnedWeaponModel.GetComponent<AudioSource>();
+            if (source != null && source.clip != null)
             {
-                EnemyAI enemy = netObj.GetComponent<EnemyAI>();
-                if (enemy != null)
-                {
-                    enemy.TakeDamage(damage);
-                    return;
-                }
-
-                FriendlyAI friendly = netObj.GetComponent<FriendlyAI>();
-                if (friendly != null)
-                {
-                    friendly.TakeDamage(damage);
-                    return;
-                }
-
-                PlayerControllerFPS otherPlayer = netObj.GetComponent<PlayerControllerFPS>();
-                if (otherPlayer != null && otherPlayer != this)
-                {
-                    otherPlayer.TakeDamage(damage);
-                }
+                source.PlayOneShot(source.clip);
             }
         }
     }
@@ -274,8 +278,17 @@ public class PlayerControllerFPS : NetworkBehaviour
         GameObject spawnPoint = GameObject.Find("SpawnPoint");
         if (spawnPoint != null)
         {
+            RespawnPlayerClientRpc(spawnPoint.transform.position);
+        }
+    }
+
+    [ClientRpc]
+    void RespawnPlayerClientRpc(Vector3 spawnPosition)
+    {
+        if (IsOwner)
+        {
             if (controller != null) controller.enabled = false;
-            transform.position = spawnPoint.transform.position;
+            transform.position = spawnPosition;
             if (controller != null) controller.enabled = true;
         }
     }
@@ -301,101 +314,4 @@ public class PlayerControllerFPS : NetworkBehaviour
 
         GameObject realPrefab = BuildManager.Instance.allItems[itemIndex].solidPrefab;
 
-        if (realPrefab != null && realPrefab.GetComponent<EnemyAI>() != null)
-        {
-            if (ServerMatchController.Instance != null && !ServerMatchController.Instance.CanSpawnZombie())
-            {
-                return;
-            }
-        }
-
-        if (realPrefab != null)
-        {
-            GameObject newBlock = Instantiate(realPrefab, spawnPos, Quaternion.identity);
-            newBlock.GetComponent<NetworkObject>().Spawn();
-        }
-    }
-
-    public void DestroyBlock(ulong networkObjectId)
-    {
-        if (!IsOwner) return;
-        DestroyBlockServerRpc(networkObjectId);
-    }
-
-    [ServerRpc]
-    void DestroyBlockServerRpc(ulong networkObjectId)
-    {
-        if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(networkObjectId, out NetworkObject netObj))
-        {
-            if (netObj != null) netObj.Despawn(true);
-        }
-    }
-
-    void GetInput()
-    {
-        moveInput = Vector2.zero;
-
-        if (movementJoystick != null)
-        {
-            moveInput.x = movementJoystick.Horizontal;
-            moveInput.y = movementJoystick.Vertical;
-        }
-
-        if (moveInput.x == 0 && moveInput.y == 0)
-        {
-            moveInput.x = Input.GetAxisRaw("Horizontal");
-            moveInput.y = Input.GetAxisRaw("Vertical");
-        }
-
-        lookInput = Vector2.zero;
-
-        if (Input.GetMouseButton(0))
-        {
-            lookInput.x = Input.GetAxis("Mouse X") * mouseSensitivity;
-            lookInput.y = Input.GetAxis("Mouse Y") * mouseSensitivity;
-        }
-
-        if (Input.touchCount > 0)
-        {
-            for (int i = 0; i < Input.touchCount; i++)
-            {
-                Touch touch = Input.GetTouch(i);
-
-                if (touch.phase == TouchPhase.Began)
-                {
-                    if (touch.position.x > Screen.width * 0.5f && cameraTouchId == -1)
-                    {
-                        cameraTouchId = touch.fingerId;
-                    }
-                }
-
-                if (touch.fingerId == cameraTouchId)
-                {
-                    if (touch.phase == TouchPhase.Moved)
-                    {
-                        lookInput.x = touch.deltaPosition.x * mobileCameraSensitivity;
-                        lookInput.y = touch.deltaPosition.y * mobileCameraSensitivity;
-                    }
-
-                    if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
-                    {
-                        cameraTouchId = -1;
-                    }
-                }
-            }
-        }
-    }
-
-    void HandleCamera()
-    {
-        if (playerCamera == null) return;
-
-        float sensMultiplier = PlayerPrefs.GetFloat("Sensitivity", 1f);
-        float finalLookX = lookInput.x * sensMultiplier;
-        float finalLookY = lookInput.y * sensMultiplier;
-
-        transform.Rotate(Vector3.up * finalLookX);
-        xRotation = Mathf.Clamp(xRotation - finalLookY, -90f, 90f);
-        playerCamera.transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
-    }
-}
+Используйте код с осторожностью.if (realPrefab != null && realPrefab.GetComponent() != null){if (ServerMatchController.Instance != null && !ServerMatchController.Instance.CanSpawnZombie()){return;}}if (realPrefab != null){GameObject newBlock = Instantiate(realPrefab, spawnPos, Quaternion.identity);newBlock.GetComponent().Spawn(true);}}public void DestroyBlock(ulong networkObjectId){if (!IsOwner) return;DestroyBlockServerRpc(networkObjectId);}[ServerRpc]void DestroyBlockServerRpc(ulong networkObjectId){if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(networkObjectId, out NetworkObject netObj)){if (netObj != null) netObj.Despawn(true);}}void GetInput(){moveInput = Vector2.zero;if (movementJoystick != null){moveInput.x = movementJoystick.Horizontal;moveInput.y = movementJoystick.Vertical;}if (moveInput.x == 0 && moveInput.y == 0){moveInput.x = Input.GetAxisRaw("Horizontal");moveInput.y = Input.GetAxisRaw("Vertical");}lookInput = Vector2.zero;// Обзор мышкой на ПК по удержанию ЛКМ (в отсутствие тачей)if (Input.GetMouseButton(0) && Input.touchCount == 0){lookInput.x = Input.GetAxis("Mouse X") * mouseSensitivity;lookInput.y = Input.GetAxis("Mouse Y") * mouseSensitivity;}// Мобильный тачпад (Правая половина экрана)if (Input.touchCount > 0){for (int i = 0; i < Input.touchCount; i++){Touch touch = Input.GetTouch(i);if (touch.phase == TouchPhase.Began){if (touch.position.x > Screen.width * 0.5f && cameraTouchId == -1){cameraTouchId = touch.fingerId;}}if (touch.fingerId == cameraTouchId){if (touch.phase == TouchPhase.Moved){lookInput.x = touch.deltaPosition.x * mobileCameraSensitivity;lookInput.y = touch.deltaPosition.y * mobileCameraSensitivity;}if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled){cameraTouchId = -1;}}}}}void HandleCamera(){if (playerCamera == null) return;float sensMultiplier = PlayerPrefs.GetFloat("Sensitivity", 1f);float finalLookX = lookInput.x * sensMultiplier;float finalLookY = lookInput.y * sensMultiplier;transform.Rotate(Vector3.up * finalLookX);xRotation = Mathf.Clamp(xRotation - finalLookY, -90f, 90f);playerCamera.transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);}}
