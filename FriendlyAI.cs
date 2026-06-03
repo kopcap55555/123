@@ -4,18 +4,18 @@ using System.Collections;
 
 public class FriendlyAI : NetworkBehaviour
 {
-    [Header("НАСТРОЙКИ МИРНОГО ЖИТЕЛЯ")]
-    [SerializeField, InspectorName("Скорость прогулки")]
+    [Header("РќРђРЎРўР РћР™РљР РњРР РќРћР“Рћ Р–РРўР•Р›РЇ")]
+    [SerializeField, InspectorName("РЎРєРѕСЂРѕСЃС‚СЊ РїСЂРѕРіСѓР»РєРё")]
     private float walkSpeed = 2f;
-    [SerializeField, InspectorName("Скорость бега (Паника)")]
+    [SerializeField, InspectorName("РЎРєРѕСЂРѕСЃС‚СЊ Р±РµРіР° (РџР°РЅРёРєР°)")]
     private float panicSpeed = 5f;
-    [SerializeField, InspectorName("Радиус прогулки")]
+    [SerializeField, InspectorName("Р Р°РґРёСѓСЃ РїСЂРѕРіСѓР»РєРё")]
     private float walkRadius = 8f;
-    [SerializeField, InspectorName("Радиус страха (Зомби рядом)")]
+    [SerializeField, InspectorName("Р Р°РґРёСѓСЃ СЃС‚СЂР°С…Р° (Р—РѕРјР±Рё СЂСЏРґРѕРј)")]
     private float fearRadius = 6f;
 
-    [Header("ЗДОРОВЬЕ ЖИТЕЛЯ")]
-    [SerializeField, InspectorName("Максимальное ХП")]
+    [Header("Р—Р”РћР РћР’Р¬Р• Р–РРўР•Р›РЇ")]
+    [SerializeField, InspectorName("РњР°РєСЃРёРјР°Р»СЊРЅРѕРµ РҐРџ")]
     private int maxHP = 40;
     private int currentHP;
 
@@ -42,7 +42,7 @@ public class FriendlyAI : NetworkBehaviour
         {
             InvokeRepeating(nameof(CheckDangerOptimized), 1f, 0.33f);
             ChooseNewWalkPoint();
-            skinIndex.Value = 1; // Индекс карточки жителя
+            skinIndex.Value = 1; // РРЅРґРµРєСЃ РєР°СЂС‚РѕС‡РєРё Р¶РёС‚РµР»СЏ
         }
 
         ApplyCustomSkin(skinIndex.Value);
